@@ -16,17 +16,19 @@
 from __future__ import print_function
 
 import argparse
-import base64
 import contextlib
 import gzip
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 
+from oslo_serialization import base64
 from oslo_utils import importutils
 from oslo_utils import strutils
+import six
 
 from ironicclient.common.i18n import _
 from ironicclient import exc
@@ -34,18 +36,16 @@ from ironicclient import exc
 
 class HelpFormatter(argparse.HelpFormatter):
     def start_section(self, heading):
-        # Title-case the headings
-        heading = '%s%s' % (heading[0].upper(), heading[1:])
-        super(HelpFormatter, self).start_section(heading)
+        super(HelpFormatter, self).start_section(heading.capitalize())
 
 
 def define_command(subparsers, command, callback, cmd_mapper):
-    '''Define a command in the subparsers collection.
+    """Define a command in the subparsers collection.
 
     :param subparsers: subparsers collection where the command will go
     :param command: command name
     :param callback: function that will be used to process the command
-    '''
+    """
     desc = callback.__doc__ or ''
     help = desc.strip().split('\n')[0]
     arguments = getattr(callback, 'arguments', [])
@@ -57,8 +57,13 @@ def define_command(subparsers, command, callback, cmd_mapper):
     subparser.add_argument('-h', '--help', action='help',
                            help=argparse.SUPPRESS)
     cmd_mapper[command] = subparser
+    required_args = subparser.add_argument_group(_("Required arguments"))
+
     for (args, kwargs) in arguments:
-        subparser.add_argument(*args, **kwargs)
+        if kwargs.get('required'):
+            required_args.add_argument(*args, **kwargs)
+        else:
+            subparser.add_argument(*args, **kwargs)
     subparser.set_defaults(func=callback)
 
 
@@ -100,11 +105,33 @@ def split_and_deserialize(string):
     return (key, value)
 
 
+def key_value_pairs_to_dict(key_value_pairs):
+    """Convert a list of key-value pairs to a dictionary.
+
+    :param key_value_pairs: a list of strings, each string is in the form
+                            <key>=<value>
+    :returns: a dictionary, possibly empty
+    """
+    if key_value_pairs:
+        return dict(split_and_deserialize(v) for v in key_value_pairs)
+    return {}
+
+
 def args_array_to_dict(kwargs, key_to_convert):
+    """Convert the value in a dictionary entry to a dictionary.
+
+    From the kwargs dictionary, converts the value of the key_to_convert
+    entry from a list of key-value pairs to a dictionary.
+
+    :param kwargs: a dictionary
+    :param key_to_convert: the key (in kwargs), whose value is expected to
+        be a list of key=value strings. This value will be converted to a
+        dictionary.
+    :returns: kwargs, the (modified) dictionary
+    """
     values_to_convert = kwargs.get(key_to_convert)
     if values_to_convert:
-        kwargs[key_to_convert] = dict(split_and_deserialize(v)
-                                      for v in values_to_convert)
+        kwargs[key_to_convert] = key_value_pairs_to_dict(values_to_convert)
     return kwargs
 
 
@@ -125,6 +152,27 @@ def args_array_to_patch(op, attributes):
         else:
             raise exc.CommandError(_('Unknown PATCH operation: %s') % op)
     return patch
+
+
+def convert_list_props_to_comma_separated(data, props=None):
+    """Convert the list-type properties to comma-separated strings
+
+    :param data: the input dict object.
+    :param props: the properties whose values will be converted.
+        Default to None to convert all list-type properties of the input.
+    :returns: the result dict instance.
+    """
+    result = dict(data)
+
+    if props is None:
+        props = data.keys()
+
+    for prop in props:
+        val = data.get(prop, None)
+        if isinstance(val, list):
+            result[prop] = ', '.join(map(six.text_type, val))
+
+    return result
 
 
 def common_params_for_list(args, fields, field_labels):
@@ -175,7 +223,7 @@ def common_params_for_list(args, fields, field_labels):
 
 
 def common_filters(marker=None, limit=None, sort_key=None, sort_dir=None,
-                   fields=None):
+                   fields=None, detail=False):
     """Generate common filters for any list request.
 
     :param marker: entity ID from which to start returning entities.
@@ -184,6 +232,9 @@ def common_filters(marker=None, limit=None, sort_key=None, sort_dir=None,
     :param sort_dir: direction of sorting: 'asc' or 'desc'.
     :param fields: a list with a specified set of fields of the resource
                    to be returned.
+    :param detail: Boolean, True to return detailed information. This parameter
+                   can be used for resources which accept 'detail' as a URL
+                   parameter.
     :returns: list of string filters.
     """
     filters = []
@@ -197,6 +248,8 @@ def common_filters(marker=None, limit=None, sort_key=None, sort_dir=None,
         filters.append('sort_dir=%s' % sort_dir)
     if fields is not None:
         filters.append('fields=%s' % ','.join(fields))
+    if detail:
+        filters.append('detail=True')
     return filters
 
 
@@ -252,7 +305,7 @@ def make_configdrive(path):
             g.close()
 
             tmpzipfile.seek(0)
-            return base64.b64encode(tmpzipfile.read())
+            return base64.encode_as_bytes(tmpzipfile.read())
 
 
 def check_empty_arg(arg, arg_descriptor):
@@ -293,7 +346,7 @@ def check_for_invalid_fields(fields, valid_fields):
 
     :param fields: A list of fields specified by the user.
     :param valid_fields: A list of valid fields.
-    raises: CommandError: If invalid fields were specified by the user.
+    :raises CommandError: If invalid fields were specified by the user.
     """
     if not fields:
         return
@@ -304,3 +357,45 @@ def check_for_invalid_fields(fields, valid_fields):
             _('Invalid field(s) requested: %(invalid)s. Valid fields '
               'are: %(valid)s.') % {'invalid': ', '.join(invalid_fields),
                                     'valid': ', '.join(valid_fields)})
+
+
+def get_from_stdin(info_desc):
+    """Read information from stdin.
+
+    :param info_desc: A string description of the desired information
+    :raises: InvalidAttribute if there was a problem reading from stdin
+    :returns: the string that was read from stdin
+    """
+    try:
+        info = sys.stdin.read().strip()
+    except Exception as e:
+        err = _("Cannot get %(desc)s from standard input. Error: %(err)s")
+        raise exc.InvalidAttribute(err % {'desc': info_desc, 'err': e})
+    return info
+
+
+def handle_json_or_file_arg(json_arg):
+    """Attempts to read JSON argument from file or string.
+
+    :param json_arg: May be a file name containing the JSON, or
+        a JSON string.
+    :returns: A list or dictionary parsed from JSON.
+    :raises: InvalidAttribute if the argument cannot be parsed.
+    """
+
+    if os.path.isfile(json_arg):
+        try:
+            with open(json_arg, 'r') as f:
+                json_arg = f.read().strip()
+        except Exception as e:
+            err = _("Cannot get JSON from file '%(file)s'. "
+                    "Error: %(err)s") % {'err': e, 'file': json_arg}
+            raise exc.InvalidAttribute(err)
+    try:
+        json_arg = json.loads(json_arg)
+    except ValueError as e:
+        err = (_("For JSON: '%(string)s', error: '%(err)s'") %
+               {'err': e, 'string': json_arg})
+        raise exc.InvalidAttribute(err)
+
+    return json_arg

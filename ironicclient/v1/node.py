@@ -12,7 +12,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import logging
 import os
+import time
 
 from oslo_utils import strutils
 
@@ -20,13 +22,20 @@ from ironicclient.common import base
 from ironicclient.common.i18n import _
 from ironicclient.common import utils
 from ironicclient import exc
-
+from ironicclient.v1 import volume_connector
+from ironicclient.v1 import volume_target
 
 _power_states = {
     'on': 'power on',
     'off': 'power off',
     'reboot': 'rebooting',
+    'soft off': 'soft power off',
+    'soft reboot': 'soft rebooting',
 }
+
+
+LOG = logging.getLogger(__name__)
+_DEFAULT_POLL_INTERVAL = 2
 
 
 class Node(base.Resource):
@@ -37,12 +46,19 @@ class Node(base.Resource):
 class NodeManager(base.CreateManager):
     resource_class = Node
     _creation_attributes = ['chassis_uuid', 'driver', 'driver_info',
-                            'extra', 'uuid', 'properties', 'name']
+                            'extra', 'uuid', 'properties', 'name',
+                            'boot_interface', 'console_interface',
+                            'deploy_interface', 'inspect_interface',
+                            'management_interface', 'network_interface',
+                            'power_interface', 'raid_interface',
+                            'storage_interface', 'vendor_interface',
+                            'resource_class']
     _resource_name = 'nodes'
 
     def list(self, associated=None, maintenance=None, marker=None, limit=None,
              detail=False, sort_key=None, sort_dir=None, fields=None,
-             provision_state=None, driver=None):
+             provision_state=None, driver=None, resource_class=None,
+             chassis=None):
         """Retrieve a list of nodes.
 
         :param associated: Optional. Either a Boolean or a string
@@ -83,6 +99,12 @@ class NodeManager(base.CreateManager):
         :param driver: Optional. String value to get only nodes using that
                        driver.
 
+        :param resource_class: Optional. String value to get only nodes
+                               with the given resource class set.
+
+        :param chassis: Optional, the UUID of a chassis. Used to get only
+                        nodes of this chassis.
+
         :returns: A list of nodes.
 
         """
@@ -103,6 +125,10 @@ class NodeManager(base.CreateManager):
             filters.append('provision_state=%s' % provision_state)
         if driver is not None:
             filters.append('driver=%s' % driver)
+        if resource_class is not None:
+            filters.append('resource_class=%s' % resource_class)
+        if chassis is not None:
+            filters.append('chassis_uuid=%s' % chassis)
 
         path = ''
         if detail:
@@ -171,6 +197,118 @@ class NodeManager(base.CreateManager):
             return self._list_pagination(self._path(path), "ports",
                                          limit=limit)
 
+    def list_volume_connectors(self, node_id, marker=None, limit=None,
+                               sort_key=None, sort_dir=None, detail=False,
+                               fields=None):
+        """List all the volume connectors for a given node.
+
+        :param node_id: Name or UUID of the node.
+        :param marker: Optional, the UUID of a volume connector, eg the last
+                       volume connector from a previous result set. Return
+                       the next result set.
+        :param limit: The maximum number of results to return per
+                      request, if:
+
+            1) limit > 0, the maximum number of volume connectors to return.
+            2) limit == 0, return the entire list of volume connectors.
+            3) limit param is NOT specified (None), the number of items
+               returned respect the maximum imposed by the Ironic API
+               (see Ironic's api.max_limit option).
+
+        :param sort_key: Optional, field used for sorting.
+
+        :param sort_dir: Optional, direction of sorting, either 'asc' (the
+                         default) or 'desc'.
+
+        :param detail: Optional, boolean whether to return detailed information
+                       about volume connectors.
+
+        :param fields: Optional, a list with a specified set of fields
+                       of the resource to be returned. Can not be used
+                       when 'detail' is set.
+
+        :returns: A list of volume connectors.
+
+        """
+        if limit is not None:
+            limit = int(limit)
+
+        if detail and fields:
+            raise exc.InvalidAttribute(_("Can't fetch a subset of fields "
+                                         "with 'detail' set"))
+
+        filters = utils.common_filters(marker=marker, limit=limit,
+                                       sort_key=sort_key, sort_dir=sort_dir,
+                                       fields=fields, detail=detail)
+
+        path = "%s/volume/connectors" % node_id
+        if filters:
+            path += '?' + '&'.join(filters)
+
+        if limit is None:
+            return self._list(self._path(path), response_key="connectors",
+                              obj_class=volume_connector.VolumeConnector)
+        else:
+            return self._list_pagination(
+                self._path(path), response_key="connectors", limit=limit,
+                obj_class=volume_connector.VolumeConnector)
+
+    def list_volume_targets(self, node_id, marker=None, limit=None,
+                            sort_key=None, sort_dir=None, detail=False,
+                            fields=None):
+        """List all the volume targets for a given node.
+
+        :param node_id: Name or UUID of the node.
+        :param marker: Optional, the UUID of a volume target, eg the last
+                       volume target from a previous result set. Return
+                       the next result set.
+        :param limit: The maximum number of results to return per
+                      request, if:
+
+            1) limit > 0, the maximum number of volume targets to return.
+            2) limit == 0, return the entire list of volume targets.
+            3) limit param is NOT specified (None), the number of items
+               returned respect the maximum imposed by the Ironic API
+               (see Ironic's api.max_limit option).
+
+        :param sort_key: Optional, field used for sorting.
+
+        :param sort_dir: Optional, direction of sorting, either 'asc' (the
+                         default) or 'desc'.
+
+        :param detail: Optional, boolean whether to return detailed information
+                       about volume targets.
+
+        :param fields: Optional, a list with a specified set of fields
+                       of the resource to be returned. Can not be used
+                       when 'detail' is set.
+
+        :returns: A list of volume targets.
+
+        """
+        if limit is not None:
+            limit = int(limit)
+
+        if detail and fields:
+            raise exc.InvalidAttribute(_("Can't fetch a subset of fields "
+                                         "with 'detail' set"))
+
+        filters = utils.common_filters(marker=marker, limit=limit,
+                                       sort_key=sort_key, sort_dir=sort_dir,
+                                       fields=fields, detail=detail)
+
+        path = "%s/volume/targets" % node_id
+        if filters:
+            path += '?' + '&'.join(filters)
+
+        if limit is None:
+            return self._list(self._path(path), response_key="targets",
+                              obj_class=volume_target.VolumeTarget)
+        else:
+            return self._list_pagination(
+                self._path(path), response_key="targets", limit=limit,
+                obj_class=volume_target.VolumeTarget)
+
     def get(self, node_id, fields=None):
         return self._get(resource_id=node_id, fields=fields)
 
@@ -226,6 +364,41 @@ class NodeManager(base.CreateManager):
             raise exc.InvalidAttribute(
                 _('Unknown HTTP method: %s') % http_method)
 
+    def vif_list(self, node_ident):
+        """List VIFs attached to a given node.
+
+        :param node_ident: The UUID or Name of the node.
+        """
+        path = "%s/vifs" % node_ident
+
+        return self._list(self._path(path), "vifs")
+
+    def vif_attach(self, node_ident, vif_id, **kwargs):
+        """Attach VIF to a given node.
+
+        :param node_ident: The UUID or Name of the node.
+        :param vif_id: The UUID or Name of the VIF to attach.
+        :param kwargs: A dictionary containing the attributes of the resource
+                       that will be created.
+        """
+        path = "%s/vifs" % node_ident
+        data = {"id": vif_id}
+        if 'id' in kwargs:
+            raise exc.InvalidAttribute("The attribute 'id' can't be "
+                                       "specified in vif-info")
+        data.update(kwargs)
+        # TODO(vdrok): cleanup places doing custom path and http_method
+        self.update(path, data, http_method="POST")
+
+    def vif_detach(self, node_ident, vif_id):
+        """Detach VIF from a given node.
+
+        :param node_ident: The UUID or Name of the node.
+        :param vif_id: The UUID or Name of the VIF to detach.
+        """
+        path = "%s/vifs/%s" % (node_ident, vif_id)
+        self.delete(path)
+
     def set_maintenance(self, node_id, state, maint_reason=None):
         """Set the maintenance mode for the node.
 
@@ -255,10 +428,39 @@ class NodeManager(base.CreateManager):
         else:
             return self.delete(path)
 
-    def set_power_state(self, node_id, state):
+    def set_power_state(self, node_id, state, soft=False, timeout=None):
+        """Sets power state for a node.
+
+        :param node_id: Node identifier
+        :param state: One of target power state, 'on', 'off', or 'reboot'
+        :param soft: The flag for graceful power 'off' or 'reboot'
+        :param timeout: The timeout (in seconds) positive integer value (> 0)
+        :raises: ValueError if 'soft' or 'timeout' option is invalid
+        :returns: The status of the request
+        """
+        if state == 'on' and soft:
+            raise ValueError(
+                _("'soft' option is invalid for the power-state 'on'"))
+
         path = "%s/states/power" % node_id
-        target = {'target': _power_states.get(state, state)}
-        return self.update(path, target, http_method='PUT')
+
+        requested_state = 'soft ' + state if soft else state
+        target = _power_states.get(requested_state, state)
+
+        body = {'target': target}
+        if timeout is not None:
+            msg = _("'timeout' option for setting power state must have "
+                    "positive integer value (> 0)")
+            try:
+                timeout = int(timeout)
+            except (ValueError, TypeError):
+                raise ValueError(msg)
+
+            if timeout <= 0:
+                raise ValueError(msg)
+            body = {'target': target, 'timeout': timeout}
+
+        return self.update(path, body, http_method='PUT')
 
     def set_target_raid_config(self, node_ident, target_raid_config):
         """Sets target_raid_config for a node.
@@ -316,10 +518,7 @@ class NodeManager(base.CreateManager):
 
     def get_console(self, node_uuid):
         path = "%s/states/console" % node_uuid
-        info = self.get(path)
-        if not info:
-            return {}
-        return info.to_dict()
+        return self._get_as_dict(path)
 
     def set_console_mode(self, node_uuid, enabled):
         """Set the console mode for the node.
@@ -340,12 +539,90 @@ class NodeManager(base.CreateManager):
 
     def get_boot_device(self, node_uuid):
         path = "%s/management/boot_device" % node_uuid
-        return self.get(path).to_dict()
+        return self._get_as_dict(path)
+
+    def inject_nmi(self, node_uuid):
+        path = "%s/management/inject_nmi" % node_uuid
+        return self.update(path, {}, http_method='PUT')
 
     def get_supported_boot_devices(self, node_uuid):
         path = "%s/management/boot_device/supported" % node_uuid
-        return self.get(path).to_dict()
+        return self._get_as_dict(path)
 
     def get_vendor_passthru_methods(self, node_ident):
         path = "%s/vendor_passthru/methods" % node_ident
-        return self.get(path).to_dict()
+        return self._get_as_dict(path)
+
+    def wait_for_provision_state(self, node_ident, expected_state,
+                                 timeout=0,
+                                 poll_interval=_DEFAULT_POLL_INTERVAL,
+                                 poll_delay_function=None,
+                                 fail_on_unexpected_state=True):
+        """Helper function to wait for a node to reach a given state.
+
+        Polls Ironic API in a loop until node gets to a requested state.
+
+        Fails in the following cases:
+        * Timeout (if provided) is reached
+        * Node's last_error gets set to a non-empty value
+        * Unexpected stable state is reached and fail_on_unexpected_state is on
+        * Error state is reached (if it's not equal to expected_state)
+
+        :param node_ident: node UUID or name
+        :param expected_state: expected final provision state
+        :param timeout: timeout in seconds, no timeout if 0
+        :param poll_interval: interval in seconds between 2 poll
+        :param poll_delay_function: function to use to wait between polls
+            (defaults to time.sleep). Should take one argument - delay time
+            in seconds. Any exceptions raised inside it will abort the wait.
+        :param fail_on_unexpected_state: whether to fail if the nodes
+            reaches a different stable state.
+        :raises: StateTransitionFailed if node reached an error state
+        :raises: StateTransitionTimeout on timeout
+        """
+        if not isinstance(timeout, (int, float)) or timeout < 0:
+            raise ValueError(_('Timeout must be a non-negative number'))
+
+        threshold = time.time() + timeout
+        expected_state = expected_state.lower()
+        poll_delay_function = (time.sleep if poll_delay_function is None
+                               else poll_delay_function)
+        if not callable(poll_delay_function):
+            raise TypeError(_('poll_delay_function must be callable'))
+
+        # TODO(dtantsur): use version negotiation to request API 1.8 and use
+        # the "fields" argument to reduce amount of data sent.
+        while not timeout or time.time() < threshold:
+            node = self.get(node_ident)
+            if node.provision_state == expected_state:
+                LOG.debug('Node %(node)s reached provision state %(state)s',
+                          {'node': node_ident, 'state': expected_state})
+                return
+
+            # Note that if expected_state == 'error' we still succeed
+            if (node.last_error or node.provision_state == 'error' or
+                    node.provision_state.endswith(' failed')):
+                raise exc.StateTransitionFailed(
+                    _('Node %(node)s failed to reach state %(state)s. '
+                      'It\'s in state %(actual)s, and has error: %(error)s') %
+                    {'node': node_ident, 'state': expected_state,
+                     'actual': node.provision_state, 'error': node.last_error})
+
+            if fail_on_unexpected_state and not node.target_provision_state:
+                raise exc.StateTransitionFailed(
+                    _('Node %(node)s failed to reach state %(state)s. '
+                      'It\'s in unexpected stable state %(actual)s') %
+                    {'node': node_ident, 'state': expected_state,
+                     'actual': node.provision_state})
+
+            LOG.debug('Still waiting for node %(node)s to reach state '
+                      '%(state)s, the current state is %(actual)s',
+                      {'node': node_ident, 'state': expected_state,
+                       'actual': node.provision_state})
+            poll_delay_function(poll_interval)
+
+        raise exc.StateTransitionTimeout(
+            _('Node %(node)s failed to reach state %(state)s in '
+              '%(timeout)s seconds') % {'node': node_ident,
+                                        'state': expected_state,
+                                        'timeout': timeout})
