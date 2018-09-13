@@ -72,7 +72,13 @@ class Manager(object):
 
         :param resource_id: Identifier of the resource.
         :param fields: List of specific fields to be returned.
+        :raises exc.ValidationError: For invalid resource_id arg value.
         """
+
+        if not resource_id:
+            raise exc.ValidationError(
+                "The identifier argument is invalid. "
+                "Value provided: {!r}".format(resource_id))
 
         if fields is not None:
             resource_id = '%s?fields=' % resource_id
@@ -82,6 +88,20 @@ class Manager(object):
             return self._list(self._path(resource_id))[0]
         except IndexError:
             return None
+
+    def _get_as_dict(self, resource_id, fields=None):
+        """Retrieve a resource as a dictionary
+
+        :param resource_id: Identifier of the resource.
+        :param fields: List of specific fields to be returned.
+        :returns: a dictionary representing the resource; may be empty
+        """
+
+        resource = self._get(resource_id, fields=fields)
+        if resource:
+            return resource.to_dict()
+        else:
+            return {}
 
     def _format_body_data(self, body, response_key):
         if response_key:
@@ -201,11 +221,18 @@ class CreateManager(Manager):
         """
 
         new = {}
+        invalid = []
         for (key, value) in kwargs.items():
             if key in self._creation_attributes:
                 new[key] = value
             else:
-                raise exc.InvalidAttribute()
+                invalid.append(key)
+        if invalid:
+            raise exc.InvalidAttribute(
+                'The attribute(s) "%(attrs)s" are invalid; they are not '
+                'needed to create %(resource)s.' %
+                {'resource': self._resource_name,
+                 'attrs': '","'.join(invalid)})
         url = self._path()
         resp, body = self.api.json_request('POST', url, body=new)
         if body:
