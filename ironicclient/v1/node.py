@@ -52,13 +52,14 @@ class NodeManager(base.CreateManager):
                             'management_interface', 'network_interface',
                             'power_interface', 'raid_interface',
                             'storage_interface', 'vendor_interface',
-                            'resource_class']
+                            'resource_class', 'conductor_group']
     _resource_name = 'nodes'
 
     def list(self, associated=None, maintenance=None, marker=None, limit=None,
              detail=False, sort_key=None, sort_dir=None, fields=None,
              provision_state=None, driver=None, resource_class=None,
-             chassis=None):
+             chassis=None,
+             conductor_group=None):
         """Retrieve a list of nodes.
 
         :param associated: Optional. Either a Boolean or a string
@@ -105,6 +106,9 @@ class NodeManager(base.CreateManager):
         :param chassis: Optional, the UUID of a chassis. Used to get only
                         nodes of this chassis.
 
+        :param conductor_group: Optional. String value to get only nodes
+                                with the given conductor group set.
+
         :returns: A list of nodes.
 
         """
@@ -129,6 +133,8 @@ class NodeManager(base.CreateManager):
             filters.append('resource_class=%s' % resource_class)
         if chassis is not None:
             filters.append('chassis_uuid=%s' % chassis)
+        if conductor_group is not None:
+            filters.append('conductor_group=%s' % conductor_group)
 
         path = ''
         if detail:
